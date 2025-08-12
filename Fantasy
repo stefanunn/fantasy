@@ -1,11 +1,4 @@
-icelandic-rl-fantasy/
-├── package.json
-├── public/
-│   ├── index.html
-│   └── favicon.ico
-└── src/
-    ├── index.js
-    └── import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 
 // Icelandic RL Fantasy – Season 10 (All Starters · Leagues · Leaderboard)
 // Implements: latest publish overwrites, tie-break by best GW, and required team name.
@@ -689,4 +682,3 @@ export default function App() {
     </div>
   );
 }
-
