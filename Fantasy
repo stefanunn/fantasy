@@ -1,0 +1,692 @@
+icelandic-rl-fantasy/
+├── package.json
+├── public/
+│   ├── index.html
+│   └── favicon.ico
+└── src/
+    ├── index.js
+    └── import React, { useMemo, useState, useEffect } from "react";
+
+// Icelandic RL Fantasy – Season 10 (All Starters · Leagues · Leaderboard)
+// Implements: latest publish overwrites, tie-break by best GW, and required team name.
+// Rules: 5-player roster (all starters), max 2 per org, captain 1.5×, budget 100,000 kr.
+// Weekly lock: Saturdays 12:00 UTC (before Sunday gameweek).
+
+// --- Config ---
+const BUDGET = 100_000; // kr
+const MAX_PER_TEAM = 2;
+const ROSTER_SIZE = 5; // all start
+const TRANSFERS_PER_WEEK = 2;
+
+// Scoring
+const P_GOAL = 5;
+const P_ASSIST = 3;
+const P_SAVE = 1;
+
+// --- Utils ---
+const isk = (n) => new Intl.NumberFormat("is-IS", { style: "currency", currency: "ISK", maximumFractionDigits: 0 }).format(n);
+function classNames(...xs) { return xs.filter(Boolean).join(" "); }
+function useLocalStorage(key, initial) {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = typeof window !== "undefined" ? localStorage.getItem(key) : null;
+      return raw ? JSON.parse(raw) : initial;
+    } catch { return initial; }
+  });
+  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }, [key, value]);
+  return [value, setValue];
+}
+
+// Build gameweeks (Sun-based). League Play: 7 Sep 2025 → 9 Nov 2025. Locks Sat 12:00 UTC.
+function buildWeeks() {
+  const start = new Date(Date.UTC(2025, 8, 7)); // Sep 7, 2025 (Sun)
+  const end = new Date(Date.UTC(2025, 10, 9)); // Nov 9, 2025 (Sun)
+  const weeks = [];
+  let cur = new Date(start);
+  while (cur <= end) {
+    const weekStart = new Date(cur);
+    const lock = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth(), cur.getUTCDate() - 1, 12, 0, 0)); // Sat 12:00 UTC
+    const label = weekStart.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+    weeks.push({ start: weekStart.toISOString(), lock: lock.toISOString(), label });
+    cur.setUTCDate(cur.getUTCDate() + 7);
+  }
+  return weeks;
+}
+const WEEKS = buildWeeks();
+
+// --- Data (Liquipedia Season 10 – League Play) ---
+const TEAMS = [
+  { id: "THOR", name: "Þór", short: "ÞÓR", logo: "https://liquipedia.net/commons/images/thumb/a/a0/ThorAkureyri_allmode.png/90px-ThorAkureyri_allmode.png", color: "#e11d48" },
+  { id: "DUSTY", name: "DUSTY", short: "DY", logo: "https://liquipedia.net/commons/images/thumb/a/ad/Dusty_allmode.png/120px-Dusty_allmode.png", color: "#a855f7" },
+  { id: "STJ", name: "Stjarnan", short: "STJ", logo: "https://liquipedia.net/commons/images/thumb/c/c6/Rocket_League_default_lightmode.png/106px-Rocket_League_default_lightmode.png", color: "#1d4ed8" },
+  { id: "354", name: "354 Esports", short: "354", logo: "https://liquipedia.net/commons/images/thumb/1/12/354_Esports_allmode.png/120px-354_Esports_allmode.png", color: "#a21caf" },
+  { id: "OMON", name: "OMON", short: "OMON", logo: "https://liquipedia.net/commons/images/thumb/5/5a/OMON_allmode.png/120px-OMON_allmode.png", color: "#111827" },
+  { id: "TBD", name: "TBD (Qualifier Team)", short: "TBD", logo: "https://liquipedia.net/commons/images/thumb/c/c6/Rocket_League_default_lightmode.png/106px-Rocket_League_default_lightmode.png", color: "#6b7280" },
+];
+
+const PLAYERS = [
+  // Þór
+  { id: "steb", name: "steb", team: "THOR", price: 21000 },
+  { id: "bjarni", name: "Bjarni", team: "THOR", price: 23000 },
+  { id: "emilvald", name: "EmilVald", team: "THOR", price: 19000 },
+  { id: "paxole", name: "Paxole (S)", team: "THOR", price: 12000 },
+  // DUSTY
+  { id: "vaddimah", name: "Vaddimah", team: "DUSTY", price: 24000 },
+  { id: "ousic", name: "Ousic", team: "DUSTY", price: 22000 },
+  { id: "cryypto", name: "Cryypto", team: "DUSTY", price: 20000 },
+  { id: "bnz", name: "BNZ (S)", team: "DUSTY", price: 11000 },
+  // Stjarnan
+  { id: "dagsi", name: "Dagsi", team: "STJ", price: 20000 },
+  { id: "day", name: "Day", team: "STJ", price: 19000 },
+  { id: "porsas", name: "Porsas", team: "STJ", price: 18000 },
+  // 354 Esports
+  { id: "pez", name: "pez", team: "354", price: 20000 },
+  { id: "dan", name: "Dan !", team: "354", price: 19000 },
+  { id: "regser", name: "regser", team: "354", price: 18000 },
+  // OMON
+  { id: "bizzy", name: "Bizzy", team: "OMON", price: 20000 },
+  { id: "omo", name: "Ómó", team: "OMON", price: 19000 },
+  { id: "vano", name: "Vano", team: "OMON", price: 18500 },
+  // TBD Qualifier team
+  { id: "alfarinn", name: "Alfarinn", team: "TBD", price: 16000 },
+  { id: "toni", name: "Tóni.", team: "TBD", price: 15500 },
+  { id: "danslan", name: "danslan", team: "TBD", price: 15000 },
+  { id: "maca", name: "maca", team: "TBD", price: 15000 },
+];
+
+// --- Helpers ---
+function countByTeam(playerIds) {
+  const byTeam = {};
+  for (const id of playerIds) {
+    const p = PLAYERS.find(x => x.id === id);
+    if (!p) continue;
+    byTeam[p.team] = (byTeam[p.team] || 0) + 1;
+  }
+  return byTeam;
+}
+
+function calcPoints(stats, isCaptain) {
+  const base = (stats.goals||0)*P_GOAL + (stats.assists||0)*P_ASSIST + (stats.saves||0)*P_SAVE;
+  return isCaptain ? Math.round(base * 1.5) : base;
+}
+
+const PlayerRow = ({ p, team, selected, disabled, onToggle }) => (
+  <div className={classNames(
+    "grid grid-cols-12 items-center gap-2 rounded-xl px-3 py-2 border hover:shadow transition",
+    selected ? "bg-emerald-50 border-emerald-300" : "bg-white border-gray-200"
+  )}>
+    <div className="col-span-5 sm:col-span-5 flex items-center gap-3">
+      <img src={team?.logo} className="h-8 w-8 rounded bg-white object-contain" alt="logo" onError={(e)=>{e.currentTarget.style.display='none';}}/>
+      <div>
+        <div className="font-semibold leading-tight">{p.name}</div>
+        <div className="text-xs text-gray-500">{team?.name||p.team}</div>
+      </div>
+    </div>
+    <div className="col-span-3 sm:col-span-3 text-sm sm:text-base font-semibold">{isk(p.price)}</div>
+    <div className="col-span-2 sm:col-span-2"><span className="text-xs px-2 py-1 rounded-full border">{team?.short||p.team}</span></div>
+    <div className="col-span-2 sm:col-span-2 text-right">
+      <button
+        onClick={onToggle}
+        disabled={disabled && !selected}
+        className={classNames(
+          "rounded-xl px-3 py-2 text-sm font-semibold border",
+          selected ? "bg-emerald-600 text-white border-emerald-700" : "bg-white",
+          disabled && !selected ? "opacity-40 cursor-not-allowed" : "hover:bg-gray-50"
+        )}
+      >
+        {selected ? "Remove" : "Add"}
+      </button>
+    </div>
+  </div>
+);
+
+// --- App ---
+export default function App() {
+  // Profile & League state (required teamName)
+  const [profile, setProfile] = useLocalStorage("is-rl-fantasy-profile", {
+    userId: (typeof crypto!=="undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)),
+    name: "Player",
+    teamName: "" // REQUIRED before publishing to league
+  });
+  const [league, setLeague] = useLocalStorage("is-rl-fantasy-league", { leagueId: "solo", name: "Solo League" });
+
+  // Read league from URL (?league=CODE)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("league");
+      if (code && code !== league.leagueId) {
+        setLeague({ leagueId: code, name: "Community League" });
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [query, setQuery] = useState("");
+  const [teamFilter, setTeamFilter] = useState("ALL");
+  const [activeTab, setActiveTab] = useState("players"); // players | captain | scoring | league | leaderboard
+
+  const [roster, setRoster] = useLocalStorage("is-rl-fantasy-roster", []);
+  const [captainByWeek, setCaptainByWeek] = useLocalStorage("is-rl-fantasy-captain", {});
+  const [statsByWeek, setStatsByWeek] = useLocalStorage("is-rl-fantasy-stats", {});
+  const [savedRosterByWeek, setSavedRosterByWeek] = useLocalStorage("is-rl-fantasy-saved", {});
+  const [weekIndex, setWeekIndex] = useLocalStorage("is-rl-fantasy-week", 0);
+
+  const [leagueStore, setLeagueStore] = useLocalStorage(`is-rl-fantasy-league:${league.leagueId}` , { members: {}, weeks: {} });
+
+  const teamsById = useMemo(() => Object.fromEntries(TEAMS.map(t => [t.id, t])), []);
+
+  const filtered = useMemo(() => {
+    return PLAYERS
+      .filter(p => teamFilter === "ALL" || p.team === teamFilter)
+      .filter(p => !query || p.name.toLowerCase().includes(query.toLowerCase()))
+      .sort((a,b) => a.team.localeCompare(b.team) || b.price - a.price);
+  }, [query, teamFilter]);
+
+  const total = roster.reduce((sum, id) => sum + (PLAYERS.find(p=>p.id===id)?.price || 0), 0);
+  const remaining = BUDGET - total;
+
+  // Team cap
+  const byTeam = countByTeam(roster);
+  const teamCapBreaches = Object.values(byTeam).some(cnt => cnt > MAX_PER_TEAM);
+
+  const canAddMore = roster.length < ROSTER_SIZE && remaining > 0;
+
+  function willViolateTeamCap(nextRoster) {
+    const counts = countByTeam(nextRoster);
+    return Object.values(counts).some(c => c > MAX_PER_TEAM);
+  }
+
+  // Lock window
+  const nowIso = new Date().toISOString();
+  const currentWeek = WEEKS[weekIndex] || WEEKS[0];
+  const isLocked = nowIso >= currentWeek.lock;
+
+  function togglePlayer(id) {
+    if (isLocked) return; // no transfers after lock
+    setRoster(prev => {
+      const next = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id];
+      if (!prev.includes(id) && (next.length > ROSTER_SIZE || willViolateTeamCap(next))) return prev; // block add
+      return next;
+    });
+  }
+
+  function resetTeam() { if (!isLocked) setRoster([]); }
+
+  // Transfer counting vs saved snapshot for this week
+  const savedRoster = savedRosterByWeek[weekIndex] || [];
+  const transferCount = (() => {
+    const a = new Set(savedRoster);
+    const b = new Set(roster);
+    let diff = 0;
+    for (const id of a) if (!b.has(id)) diff++;
+    for (const id of b) if (!a.has(id)) diff++;
+    return diff; // total ins + outs
+  })();
+  const transferLimitBreached = transferCount > TRANSFERS_PER_WEEK;
+
+  function saveWeek() {
+    if (teamCapBreaches) return alert("Team cap exceeded (max 2 per org). Fix before saving.");
+    if (roster.length !== ROSTER_SIZE) return alert(`Pick exactly ${ROSTER_SIZE} players before saving.`);
+    if (remaining < 0) return alert("Over budget.");
+    if (transferLimitBreached) return alert(`Transfer limit is ${TRANSFERS_PER_WEEK} per week.`);
+    const cap = captainByWeek[weekIndex];
+    if (!cap || !roster.includes(cap)) return alert("Choose a captain from your roster.");
+    setSavedRosterByWeek({ ...savedRosterByWeek, [weekIndex]: roster });
+    alert("Saved!");
+  }
+
+  // Captain
+  function setCaptain(id) {
+    if (isLocked) return;
+    if (!roster.includes(id)) return;
+    setCaptainByWeek({ ...captainByWeek, [weekIndex]: id });
+  }
+
+  // Scoring
+  const weekStats = statsByWeek[weekIndex] || {}; // { [playerId]: {goals, assists, saves} }
+  function setStat(id, key, val) {
+    const n = Math.max(0, Number(val)||0);
+    setStatsByWeek({
+      ...statsByWeek,
+      [weekIndex]: { ...weekStats, [id]: { ...(weekStats[id]||{}), [key]: n } }
+    });
+  }
+
+  const pointsByPlayer = Object.fromEntries(roster.map(id => {
+    const stats = weekStats[id] || { goals: 0, assists: 0, saves: 0 };
+    const isCaptain = captainByWeek[weekIndex] === id;
+    return [id, calcPoints(stats, isCaptain)];
+  }));
+  const teamPoints = Object.values(pointsByPlayer).reduce((a,b)=>a+b,0);
+
+  // --- League: publish my weekly entry ---
+  const deepClone = (x) => JSON.parse(JSON.stringify(x));
+  function publishToLeague() {
+    if (league.leagueId === "solo") return alert("Create or join a league first.");
+    if (!profile.teamName || !profile.teamName.trim()) return alert("Please choose a team name in the League tab.");
+    if (roster.length !== ROSTER_SIZE) return alert(`Pick exactly ${ROSTER_SIZE} players.`);
+    const cap = captainByWeek[weekIndex];
+    if (!cap) return alert("Set a captain first.");
+    const entry = { userId: profile.userId, name: profile.name, teamName: profile.teamName.trim(), weekIndex, roster, captain: cap, stats: weekStats, points: teamPoints, timestamp: new Date().toISOString() };
+    const next = deepClone(leagueStore);
+    next.members[profile.userId] = { name: profile.name, teamName: profile.teamName.trim() };
+    if (!next.weeks[weekIndex]) next.weeks[weekIndex] = {};
+    // Latest should overwrite: assigning directly replaces any previous publish for this GW
+    next.weeks[weekIndex][profile.userId] = entry;
+    setLeagueStore(next);
+    alert("Published to league.");
+  }
+
+  // Share helpers (no backend): copy my single-week update; copy full league snapshot; import merge (latest overwrites)
+  function copyMyUpdate() {
+    const cap = captainByWeek[weekIndex];
+    const payload = { type: "icerl_fantasy_update", leagueId: league.leagueId, data: { userId: profile.userId, name: profile.name, teamName: profile.teamName?.trim()||"", weekIndex, roster, captain: cap, stats: weekStats } };
+    navigator.clipboard?.writeText(JSON.stringify(payload, null, 2));
+    alert("Copied your update to clipboard. Friends can paste it into Import.");
+  }
+  function copyLeagueSnapshot() {
+    const payload = { type: "icerl_fantasy_league", leagueId: league.leagueId, name: league.name, store: leagueStore };
+    navigator.clipboard?.writeText(JSON.stringify(payload, null, 2));
+    alert("Copied league snapshot to clipboard.");
+  }
+  function importMerge(text) {
+    try {
+      const payload = JSON.parse(text);
+      if (payload.type === "icerl_fantasy_update" && payload.leagueId === league.leagueId) {
+        const { userId, name, teamName, weekIndex: wi, roster: r, captain: c, stats } = payload.data;
+        const next = deepClone(leagueStore);
+        next.members[userId] = { name, teamName: teamName||next.members[userId]?.teamName||"" };
+        if (!next.weeks[wi]) next.weeks[wi] = {};
+        // Latest overwrites unconditionally
+        next.weeks[wi][userId] = { userId, name, teamName: next.members[userId].teamName, weekIndex: wi, roster: r, captain: c, stats, points: 0, timestamp: new Date().toISOString() };
+        // compute points for imported entry
+        const pts = (r||[]).reduce((sum, id) => {
+          const s = (stats||{})[id] || { goals:0, assists:0, saves:0 };
+          const isCap = c === id;
+          return sum + calcPoints(s, isCap);
+        }, 0);
+        next.weeks[wi][userId].points = pts;
+        setLeagueStore(next);
+        alert("Imported update!");
+      } else if (payload.type === "icerl_fantasy_league" && payload.leagueId === league.leagueId) {
+        setLeagueStore(payload.store);
+        alert("Imported league snapshot!");
+      } else {
+        alert("Mismatched league code or invalid payload.");
+      }
+    } catch (e) { alert("Invalid JSON"); }
+  }
+
+  // Leaderboard computations (tie-breaker: total desc, then BEST single GW up to selected week desc)
+  const leagueMembers = leagueStore.members || {};
+  const leagueWeeks = leagueStore.weeks || {};
+  function totalForUserUpTo(userId, uptoIndex) {
+    let sum = 0;
+    for (let i=0;i<=uptoIndex;i++) {
+      const w = leagueWeeks[i];
+      if (w && w[userId]) sum += (w[userId].points||0);
+    }
+    return sum;
+  }
+  function bestWeekForUserUpTo(userId, uptoIndex) {
+    let best = 0;
+    for (let i=0;i<=uptoIndex;i++) {
+      const w = leagueWeeks[i];
+      if (w && w[userId]) best = Math.max(best, (w[userId].points||0));
+    }
+    return best;
+  }
+  const leaderboardWeek = Object.entries(leagueMembers).map(([uid, m]) => {
+    const w = leagueWeeks[weekIndex]?.[uid];
+    return {
+      userId: uid,
+      name: m.name,
+      teamName: m.teamName||"",
+      week: w?.points||0,
+      total: totalForUserUpTo(uid, weekIndex),
+      best: bestWeekForUserUpTo(uid, weekIndex)
+    };
+  }).sort((a,b)=> (
+    b.total - a.total ||
+    b.best - a.best ||
+    0
+  ));
+
+  // Export / Import / Print (kept)
+  function doExport() {
+    const blob = new Blob([JSON.stringify({ roster, captainByWeek, statsByWeek, savedRosterByWeek }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'icelandic-rl-fantasy.json'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function doImport(ev) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (data.roster) setRoster(data.roster);
+        if (data.captainByWeek) setCaptainByWeek(data.captainByWeek);
+        if (data.statsByWeek) setStatsByWeek(data.statsByWeek);
+        if (data.savedRosterByWeek) setSavedRosterByWeek(data.savedRosterByWeek);
+        alert("Imported!");
+      } catch (e) { alert("Invalid file"); }
+    };
+    reader.readAsText(file);
+  }
+  function printSheet() { window.print(); }
+
+  // --- Self-tests (console only) ---
+  useEffect(() => {
+    try {
+      // countByTeam
+      const c1 = countByTeam(["steb","bjarni","vaddimah"]);
+      console.assert(c1["THOR"]===2 && c1["DUSTY"]===1, "countByTeam basic fail", c1);
+      // calcPoints
+      console.assert(calcPoints({goals:1,assists:1,saves:1}, false) === (P_GOAL+P_ASSIST+P_SAVE), "calcPoints base fail");
+      console.assert(calcPoints({goals:2,assists:0,saves:0}, true) === Math.round(2*P_GOAL*1.5), "calcPoints captain fail");
+      // weeks
+      console.assert(WEEKS.length >= 9, "weeks length suspicious", WEEKS.length);
+      const firstLock = new Date(WEEKS[0].lock); console.assert(firstLock.getUTCDay()===6 && firstLock.getUTCHours()===12, "lock schedule fail", firstLock.toUTCString());
+      // leaderboard tie-break: total equal -> best GW desc
+      const fake = { members: { a:{name:'A',teamName:'TA'}, b:{name:'B',teamName:'TB'} }, weeks: { 0:{ a:{points:10}, b:{points:10} }, 1:{ a:{points:5}, b:{points:9} } } };
+      const lw = fake.weeks; const total=(u)=> (lw[0][u].points||0)+(lw[1][u].points||0); const best=(u)=> Math.max(lw[0][u].points,lw[1][u].points);
+      const ab = [{userId:'a',total:total('a'),best:best('a')},{userId:'b',total:total('b'),best:best('b')}].sort((x,y)=> y.total-x.total || y.best-x.best);
+      console.assert(ab[0].userId==='b', 'tie-break by best GW failed', ab);
+    } catch {}
+  }, []);
+
+  // --- Render ---
+  const rosterPlayers = roster.map(id => PLAYERS.find(p => p.id === id));
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white text-slate-900 p-4 sm:p-8 print:bg-white">
+      <div className="max-w-6xl mx-auto">
+        <header className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-6 print:mb-2">
+          <div>
+            <h1 className="text-3xl sm:text-4xl font-black tracking-tight">Icelandic RL Fantasy – Season 10</h1>
+            <p className="text-sm text-slate-600 mt-1">Budget: <span className="font-semibold">{isk(BUDGET)}</span> · Pick {ROSTER_SIZE} players · Max {MAX_PER_TEAM} per org · All starters, Captain 1.5×</p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap print:hidden">
+            <button onClick={doExport} className="rounded-xl border px-3 py-2 hover:bg-slate-50">Export</button>
+            <label className="rounded-xl border px-3 py-2 hover:bg-slate-50 cursor-pointer">
+              Import<input type="file" accept="application/json" className="hidden" onChange={doImport} />
+            </label>
+            <button onClick={printSheet} className="rounded-xl border px-3 py-2 hover:bg-slate-50">Print</button>
+          </div>
+        </header>
+
+        {/* Week selector */}
+        <div className="flex items-center gap-3 mb-4 print:hidden">
+          <label className="text-sm font-semibold">Gameweek</label>
+          <select value={weekIndex} onChange={e=>setWeekIndex(Number(e.target.value))} className="rounded-xl border px-3 py-2">
+            {WEEKS.map((w,i)=>(<option key={i} value={i}>{i+1} – {w.label}</option>))}
+          </select>
+          <span className={classNames("text-xs px-2 py-1 rounded-full border", isLocked ? "bg-rose-50 border-rose-300" : "bg-emerald-50 border-emerald-300")}>{isLocked ? "Locked" : "Open"}</span>
+          <span className="text-xs text-slate-500">Locks {new Date((WEEKS[weekIndex]||WEEKS[0]).lock).toUTCString()}</span>
+          <button onClick={saveWeek} className="ml-auto rounded-xl px-4 py-2 font-semibold text-white bg-emerald-600 hover:bg-emerald-700">Save Week</button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-2 mb-4 print:hidden">
+          {[
+            {id:"players",label:"Players"},
+            {id:"captain",label:"Captain"},
+            {id:"scoring",label:"Scoring"},
+            {id:"league",label:"League"},
+            {id:"leaderboard",label:"Leaderboard"},
+          ].map(t=> (
+            <button key={t.id} onClick={()=>setActiveTab(t.id)} className={classNames("rounded-xl px-3 py-2 border", activeTab===t.id?"bg-black text-white border-black":"bg-white hover:bg-slate-50")}>{t.label}</button>
+          ))}
+        </div>
+
+        {activeTab === "players" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+            <div className="lg:col-span-2 p-4 rounded-2xl border bg-white shadow-sm">
+              <div className="flex gap-2 flex-wrap items-center mb-4">
+                <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search players" className="w-full sm:w-64 rounded-xl border px-3 py-2"/>
+                <select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)} className="rounded-xl border px-3 py-2">
+                  <option value="ALL">All teams</option>
+                  {TEAMS.map(t => (<option value={t.id} key={t.id}>{t.name}</option>))}
+                </select>
+                <button onClick={resetTeam} className="ml-auto rounded-xl border px-3 py-2 hover:bg-slate-50" disabled={isLocked}>Reset</button>
+              </div>
+
+              <div className="space-y-2">
+                {filtered.map(p => {
+                  const selected = roster.includes(p.id);
+                  const next = selected ? roster.filter(x=>x!==p.id) : [...roster, p.id];
+                  const wouldBreakCap = !selected && (next.length>ROSTER_SIZE || willViolateTeamCap(next));
+                  const disabled = isLocked || (!selected && (!canAddMore || (remaining < p.price) || wouldBreakCap));
+                  return (
+                    <PlayerRow
+                      key={p.id}
+                      p={p}
+                      team={teamsById[p.team]}
+                      selected={selected}
+                      disabled={disabled}
+                      onToggle={() => togglePlayer(p.id)}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+
+            <aside className="p-4 rounded-2xl border bg-white shadow-sm">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-bold">Your Squad</h2>
+                <span className={classNames("text-xs px-2 py-1 rounded-full border", roster.length === ROSTER_SIZE ? "bg-emerald-50 border-emerald-300" : "bg-yellow-50 border-yellow-300")}>{roster.length}/{ROSTER_SIZE}</span>
+              </div>
+              <ul className="space-y-2 mb-4">
+                {rosterPlayers.length === 0 && (
+                  <li className="text-sm text-slate-500">No players selected yet. Add {ROSTER_SIZE} players to build your roster.</li>
+                )}
+                {rosterPlayers.map(p => (
+                  <li key={p.id} className="flex items-center justify-between gap-2 border rounded-xl px-3 py-2">
+                    <div className="flex items-center gap-3">
+                      <img src={teamsById[p.team].logo} className="h-6 w-6 object-contain" alt="logo" onError={(e)=>{e.currentTarget.style.display='none';}}/>
+                      <div>
+                        <div className="font-semibold leading-tight">{p.name}</div>
+                        <div className="text-xs text-slate-500">{teamsById[p.team].name}</div>
+                      </div>
+                    </div>
+                    <div className="text-sm font-semibold">{isk(p.price)}</div>
+                  </li>
+                ))}
+              </ul>
+
+              <div className="border-t pt-3 mt-3 text-sm space-y-1">
+                <div className="flex justify-between"><span>Total spend</span><span className="font-semibold">{isk(total)}</span></div>
+                <div className="flex justify-between"><span>Remaining</span><span className={classNames("font-semibold", remaining < 0 ? "text-rose-600" : "")}>{isk(remaining)}</span></div>
+                <div className="flex justify-between"><span>Per-team cap</span><span className={classNames("font-semibold", teamCapBreaches?"text-rose-600":"")}>max {MAX_PER_TEAM}</span></div>
+                <div className="flex justify-between"><span>Transfers used</span><span className={classNames("font-semibold", transferLimitBreached?"text-rose-600":"")}>{transferCount}/{TRANSFERS_PER_WEEK}</span></div>
+              </div>
+              <p className="text-xs text-slate-500 mt-3">Changes are disabled after the weekly lock.</p>
+            </aside>
+          </div>
+        )}
+
+        {activeTab === "captain" && (
+          <div className="p-4 rounded-2xl border bg-white shadow-sm mb-8">
+            <h3 className="text-lg font-bold mb-2">Choose Your Captain</h3>
+            <p className="text-sm text-slate-600 mb-4">Captain earns 1.5× points. Pick one of your {ROSTER_SIZE} starters.</p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              {rosterPlayers.map(p => {
+                const t = teamsById[p.team];
+                const isCap = captainByWeek[weekIndex] === p.id;
+                return (
+                  <div key={p.id} className={classNames("flex items-center justify-between gap-2 border rounded-xl px-3 py-2", isCap?"bg-amber-100 border-amber-300":"bg-white")}> 
+                    <div className="flex items-center gap-3">
+                      <img src={t.logo} className="h-6 w-6 object-contain" alt="logo" onError={(e)=>{e.currentTarget.style.display='none';}}/>
+                      <div>
+                        <div className="font-semibold leading-tight">{p.name}</div>
+                        <div className="text-xs text-slate-500">{t.name}</div>
+                      </div>
+                    </div>
+                    <button disabled={isLocked} onClick={()=>setCaptain(p.id)} className={classNames("rounded-xl border px-3 py-1 text-sm", isCap?"bg-amber-200":"hover:bg-slate-50")}>{isCap?"Captain":"Set Captain"}</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "scoring" && (
+          <div className="p-4 rounded-2xl border bg-white shadow-sm mb-8">
+            <h3 className="text-lg font-bold mb-2">Enter Weekly Stats</h3>
+            <p className="text-sm text-slate-600 mb-4">Scoring: {P_GOAL} per Goal, {P_ASSIST} per Assist, {P_SAVE} per Save. Captain scores 1.5×.</p>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b">
+                    <th className="py-2">Player</th>
+                    <th className="py-2">Role</th>
+                    <th className="py-2">G</th>
+                    <th className="py-2">A</th>
+                    <th className="py-2">S</th>
+                    <th className="py-2">Points</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rosterPlayers.map(p => {
+                    const stats = weekStats[p.id] || { goals:0, assists:0, saves:0 };
+                    const isCaptain = captainByWeek[weekIndex] === p.id;
+                    const pts = calcPoints(stats, isCaptain);
+                    const role = isCaptain?"Starter (C)":"Starter";
+                    return (
+                      <tr key={p.id} className="border-b">
+                        <td className="py-2">{p.name}</td>
+                        <td className="py-2">{role}</td>
+                        <td className="py-2"><input type="number" min={0} value={stats.goals} onChange={e=>setStat(p.id, 'goals', e.target.value)} className="w-20 rounded border px-2 py-1"/></td>
+                        <td className="py-2"><input type="number" min={0} value={stats.assists} onChange={e=>setStat(p.id, 'assists', e.target.value)} className="w-20 rounded border px-2 py-1"/></td>
+                        <td className="py-2"><input type="number" min={0} value={stats.saves} onChange={e=>setStat(p.id, 'saves', e.target.value)} className="w-20 rounded border px-2 py-1"/></td>
+                        <td className="py-2 font-semibold">{pts}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center justify-end gap-4 mt-4">
+              <div className="text-sm">Team total: <span className="font-bold">{teamPoints}</span> pts</div>
+              <button onClick={saveWeek} className="rounded-xl px-4 py-2 font-semibold text-white bg-emerald-600 hover:bg-emerald-700">Save Week</button>
+              <button onClick={publishToLeague} className="rounded-xl px-4 py-2 font-semibold text-white bg-blue-600 hover:bg-blue-700">Publish to League</button>
+              <button onClick={copyMyUpdate} className="rounded-xl px-4 py-2 font-semibold border">Copy My Update</button>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "league" && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div className="p-4 rounded-2xl border bg-white shadow-sm">
+              <h3 className="text-lg font-bold mb-2">Your Profile</h3>
+              <label className="block text-sm mb-1">Display name</label>
+              <input className="w-full rounded-xl border px-3 py-2 mb-3" value={profile.name} onChange={e=>setProfile({...profile, name: e.target.value})} />
+              <label className="block text-sm mb-1">Team name (required)</label>
+              <input className="w-full rounded-xl border px-3 py-2 mb-1" placeholder="e.g., Reykjavík Rockets" value={profile.teamName} onChange={e=>setProfile({...profile, teamName: e.target.value})} />
+              {!profile.teamName?.trim() && <div className="text-xs text-rose-600 mb-2">Please choose a team name before publishing.</div>}
+              <div className="text-xs text-slate-500 mb-4">Your ID: <span className="font-mono">{profile.userId}</span></div>
+
+              <h3 className="text-lg font-bold mb-2">League</h3>
+              <label className="block text-sm mb-1">League name</label>
+              <input className="w-full rounded-xl border px-3 py-2 mb-3" value={league.name} onChange={e=>setLeague({...league, name: e.target.value})} />
+
+              <div className="flex gap-2 mb-3">
+                <button onClick={()=>setLeague({ leagueId: ((typeof crypto!=="undefined" && crypto.randomUUID)?crypto.randomUUID():String(Math.random()).slice(2)), name: league.name||"My League" })} className="rounded-xl border px-3 py-2">Create New League</button>
+                <button onClick={()=>{
+                  const code = prompt("Enter league code to join");
+                  if (code) setLeague({ leagueId: code, name: "Community League" });
+                }} className="rounded-xl border px-3 py-2">Join by Code</button>
+              </div>
+              <div className="text-sm">League code: <span className="font-mono">{league.leagueId}</span></div>
+              <div className="text-sm">Share link: <span className="font-mono break-all">{`${window.location.origin}${window.location.pathname}?league=${league.leagueId}`}</span></div>
+
+              <div className="mt-4 flex gap-2">
+                <button onClick={copyLeagueSnapshot} className="rounded-xl border px-3 py-2">Copy League Snapshot</button>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl border bg-white shadow-sm">
+              <h3 className="text-lg font-bold mb-2">Import Updates</h3>
+              <p className="text-sm text-slate-600 mb-2">Paste your friends' updates or a full snapshot to sync standings.</p>
+              <textarea id="importBox" className="w-full rounded-xl border p-2 h-40 mb-2" placeholder="Paste JSON here"></textarea>
+              <div className="flex gap-2">
+                <button onClick={()=>{
+                  const el = document.getElementById('importBox');
+                  importMerge(el.value);
+                }} className="rounded-xl px-3 py-2 font-semibold text-white bg-blue-600 hover:bg-blue-700">Import & Merge</button>
+                <button onClick={()=>{ const el = document.getElementById('importBox'); el.value=''; }} className="rounded-xl border px-3 py-2">Clear</button>
+              </div>
+
+              <div className="mt-4 text-sm">
+                <div className="font-semibold mb-1">Members</div>
+                <ul className="space-y-1">
+                  {Object.entries(leagueMembers).map(([uid, m]) => (
+                    <li key={uid} className="flex items-center justify-between">
+                      <span>{m.teamName ? `${m.teamName} — ${m.name}` : m.name}</span>
+                      <span className="text-xs font-mono">{uid.slice(0,8)}</span>
+                    </li>
+                  ))}
+                  {Object.keys(leagueMembers).length===0 && <li className="text-slate-500">No members yet.</li>}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "leaderboard" && (
+          <div className="p-4 rounded-2xl border bg-white shadow-sm mb-8">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-bold">Leaderboard</h3>
+              <div className="text-sm">League: <span className="font-semibold">{league.name}</span> <span className="ml-2 text-xs px-2 py-1 rounded-full border">{league.leagueId}</span></div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b">
+                    <th className="py-2">#</th>
+                    <th className="py-2">Team</th>
+                    <th className="py-2">Manager</th>
+                    <th className="py-2">Best GW</th>
+                    <th className="py-2">GW{weekIndex+1}</th>
+                    <th className="py-2">Total ≤ GW{weekIndex+1}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaderboardWeek.map((row, idx) => (
+                    <tr key={row.userId} className="border-b">
+                      <td className="py-2">{idx+1}</td>
+                      <td className="py-2">{row.teamName||"—"}</td>
+                      <td className="py-2">{row.name}</td>
+                      <td className="py-2 font-mono">{row.best}</td>
+                      <td className="py-2 font-mono">{row.week}</td>
+                      <td className="py-2 font-semibold">{row.total}</td>
+                    </tr>
+                  ))}
+                  {leaderboardWeek.length===0 && (
+                    <tr><td className="py-3 text-slate-500" colSpan={6}>No entries yet. Publish from the Scoring tab, then share updates and Import.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Info / Footer */}
+        <section className="p-4 rounded-2xl border bg-white shadow-sm print:hidden">
+          <h3 className="text-lg font-bold mb-2">Season Window</h3>
+          <p className="text-sm text-slate-600">League Play: <span className="font-semibold">7 Sep 2025</span> → <span className="font-semibold">9 Nov 2025</span>. Matches are Bo5, double round-robin; all teams advance to playoffs.</p>
+        </section>
+
+        <footer className="text-xs text-slate-500 mt-6 print:hidden">
+          Data & logos © respective owners. Tournament information from Liquipedia Rocket League Wiki (Season 10 League Play). This is a community demo and not affiliated with RLÍS.
+        </footer>
+      </div>
+    </div>
+  );
+}
+
